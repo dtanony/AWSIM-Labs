@@ -82,7 +82,7 @@ sudo apt install libvulkan1
 ```
 
 ### Launching Binary Release
-You can download a binary release from [here](), unzip it, and launch the simulator using:
+You can download a binary release from [here](https://github.com/dtanony/AWSIM-Labs/releases/download/v1.0/awsim_labs.zip), unzip it, and launch the simulator using:
 ```bash
 ./awsim_labs.x86_64
 ```
