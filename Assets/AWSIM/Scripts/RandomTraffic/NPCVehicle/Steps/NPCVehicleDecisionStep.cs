@@ -1,0 +1,206 @@
+using System.Collections.Generic;
+using AWSIM_Script.Object;
+using AWSIM.AWAnalysis.CustomSim;
+using UnityEngine;
+
+namespace AWSIM.TrafficSimulation
+{
+    /// <summary>
+    /// Decision step implementation for a NPC vehicle simulation.
+    /// Based on the results of the cognitive step, it outputs a short-term target point and a decision to decelerate or accelerate.
+    /// </summary>
+    public class NPCVehicleDecisionStep
+    {
+        private NPCVehicleConfig config;
+
+        // MinFrontVehicleDistance is added to the threshold for the distance at which an obstacle is considered dangerous.
+        // The vehicle is controlled to stop at this distance away from the obstacle(e.g. another vehicle in front of the vehicle).
+        private const float MinFrontVehicleDistance = 4f;
+        private const float MinStopDistance = 1.5f;
+
+        public NPCVehicleDecisionStep(NPCVehicleConfig config)
+        {
+            this.config = config;
+        }
+
+        public void Execute(IReadOnlyList<NPCVehicleInternalState> states)
+        {
+            foreach (var state in states)
+            {
+                UpdateTargetPoint(state);
+                UpdateSpeedMode(state, config);
+            }
+        }
+
+        /// <summary>
+        /// Set short-term target point of the vehicle to the next waypoint.
+        /// </summary>
+        /// <param name="state"></param>
+        private static void UpdateTargetPoint(NPCVehicleInternalState state)
+        {
+            if (state.ShouldDespawn || state.CurrentFollowingLane == null || state.GoalArrived)
+                return;
+
+            state.TargetPoint = state.CurrentFollowingLane.Waypoints[state.WaypointIndex];
+        }
+
+        /// <summary>
+        /// Update speed mode according to the following cognition results and stoppable distance calculated by speed.<br/>
+        /// Possible speed modes and conditions are the following:<br/>
+        /// - SLOW when the vehicle is in a sharp curve, needs to keep distance from a front vehicle or is entering yielding lane.<br/>
+        /// - STOP when the vehicle can stop safely at a stop point(e.g. a stop line or a point that an obstacle exists).<br/>
+        /// - SUDDEN_STOP when the vehicle cannot stop safely at a stop point.<br/>
+        /// - ABSOLUTE_STOP when the vehicle cannot stop using SUDDEN_STOP<br/>
+        /// - NORMAL under other conditions.
+        // /// </summary>
+        private static void UpdateSpeedMode(NPCVehicleInternalState state, NPCVehicleConfig config)
+        {
+            if (state.ShouldDespawn || state.GoalArrived)
+            {
+                return;
+            }
+
+            var normalDeceleration = config.Deceleration;
+            if (!state.CustomConfig.Deceleration.Equals(NPCConfig.DUMMY_DECELERATION))
+                normalDeceleration = state.CustomConfig.Deceleration;
+
+            var absoluteStopDistance = CalculateStoppableDistance(state.Speed, config.AbsoluteDeceleration) + MinStopDistance;
+            var suddenStopDistance = CalculateStoppableDistance(state.Speed, config.SuddenDeceleration) + 2 * MinStopDistance;
+            var stopDistance = CalculateStoppableDistance(state.Speed, normalDeceleration) + 3 * MinStopDistance;
+            var slowDownDistance = stopDistance + 4 * MinStopDistance;
+
+            var distanceToStopPointByFrontVehicle = onlyGreaterThan(state.DistanceToFrontVehicle - MinFrontVehicleDistance, -MinFrontVehicleDistance);
+            var distanceToStopPointByTrafficLight = CalculateTrafficLightDistance(state, suddenStopDistance);
+            var distanceToStopPointByRightOfWay = CalculateYieldingDistance(state);
+            var distanceToGoal = CalculateGoalDistance(state);
+            var distanceToStopPoint = Mathf.Min(distanceToStopPointByFrontVehicle, distanceToStopPointByTrafficLight, distanceToStopPointByRightOfWay);
+
+            state.IsStoppedByFrontVehicle = false;
+            if (distanceToStopPointByFrontVehicle <= stopDistance)
+            {
+                state.IsStoppedByFrontVehicle = true;
+            }
+
+            if (state.CustomConfig.AggressiveDrive)
+            {
+                stopDistance = CalculateStoppableDistance(state.Speed, normalDeceleration);
+                if (distanceToStopPoint <= stopDistance + MinStopDistance || distanceToGoal <= stopDistance + 0.5f)
+                    state.SpeedMode = NPCVehicleSpeedMode.STOP;
+                else
+                    state.SpeedMode = NPCVehicleSpeedMode.NORMAL;
+            }
+            else
+            {
+                if (distanceToStopPoint <= absoluteStopDistance || distanceToGoal <= absoluteStopDistance)
+                    state.SpeedMode = NPCVehicleSpeedMode.ABSOLUTE_STOP;
+                else if (distanceToStopPoint <= suddenStopDistance || distanceToGoal <= suddenStopDistance)
+                    state.SpeedMode = NPCVehicleSpeedMode.SUDDEN_STOP;
+                else if (distanceToStopPoint <= stopDistance ||
+                         distanceToGoal <= stopDistance - 2 * MinStopDistance)
+                    state.SpeedMode = NPCVehicleSpeedMode.STOP;
+                else if (distanceToStopPoint <= slowDownDistance || state.IsTurning ||
+                         distanceToGoal <= stopDistance + 2 * MinStopDistance)
+                    state.SpeedMode = NPCVehicleSpeedMode.SLOW;
+                else
+                    state.SpeedMode = NPCVehicleSpeedMode.NORMAL;
+            }
+        }
+
+        private static float CalculateTrafficLightDistance(NPCVehicleInternalState state, float suddenStopDistance)
+        {
+            var distanceToStopPointByTrafficLight = float.MaxValue;
+            if (state.TrafficLightLane != null)
+            {
+                var distanceToStopLine =
+                    state.SignedDistanceToPointOnLane(state.TrafficLightLane.StopLine.CenterPoint);
+                switch (state.TrafficLightPassability)
+                {
+                    case TrafficLightPassability.GREEN:
+                        break;
+                    case TrafficLightPassability.YELLOW:
+                        if (distanceToStopLine < suddenStopDistance) break;
+                        distanceToStopPointByTrafficLight = distanceToStopLine;
+                        break;
+                    case TrafficLightPassability.RED:
+                        distanceToStopPointByTrafficLight = distanceToStopLine;
+                        break;
+                }
+            }
+            return onlyGreaterThan(distanceToStopPointByTrafficLight, 0);
+        }
+
+        private static float CalculateYieldingDistance(NPCVehicleInternalState state)
+        {
+            var distanceToStopPointByRightOfWay = float.MaxValue;
+            if (state.YieldPhase != NPCVehicleYieldPhase.NONE && state.YieldPhase != NPCVehicleYieldPhase.ENTERING_INTERSECTION && state.YieldPhase != NPCVehicleYieldPhase.AT_INTERSECTION)
+                distanceToStopPointByRightOfWay = state.SignedDistanceToPointOnLane(state.YieldPoint);
+            return onlyGreaterThan(distanceToStopPointByRightOfWay, -float.MaxValue);
+        }
+
+        private static float CalculateStoppableDistance(float speed, float deceleration)
+        {
+            return onlyGreaterThan(speed * speed / 2f / deceleration, 0);
+        }
+
+        private static float onlyGreaterThan(float value, float min_value = 0)
+        { return value >= min_value ? value : float.MaxValue; }
+
+        public void ShowGizmos(IReadOnlyList<NPCVehicleInternalState> states)
+        {
+            foreach (var state in states)
+            {
+                switch (state.SpeedMode)
+                {
+                    case NPCVehicleSpeedMode.ABSOLUTE_STOP:
+                    case NPCVehicleSpeedMode.SUDDEN_STOP:
+                    case NPCVehicleSpeedMode.STOP:
+                        Gizmos.color = Color.red;
+                        break;
+                    case NPCVehicleSpeedMode.SLOW:
+                        Gizmos.color = Color.yellow;
+                        break;
+                    default:
+                        Gizmos.color = Color.green;
+                        break;
+                }
+
+                var currentPosition = state.FrontCenterPosition;
+                currentPosition.y += 1f;
+
+                Gizmos.DrawLine(currentPosition, state.TargetPoint);
+
+                var rotation = Quaternion.LookRotation(currentPosition - state.TargetPoint);
+                Gizmos.matrix = Matrix4x4.TRS(state.TargetPoint, rotation, Vector3.one);
+                Gizmos.DrawFrustum(Vector3.zero, 30f, 1f, 0f, 1f);
+                Gizmos.matrix = Matrix4x4.identity;
+            }
+        }
+        
+        /// <summary>
+        /// calculate the distance to goal
+        /// </summary>
+        /// <param name="state"></param>
+        /// <returns></returns>
+        private static float CalculateGoalDistance(NPCVehicleInternalState state)
+        {
+            var distanceToGoal = float.MaxValue;
+            if (state.Goal != null)
+            {
+                TrafficLane goalLane = CustomSimUtils.ParseLane(state.Goal.GetLane());
+                if (goalLane == state.CurrentFollowingLane)
+                    distanceToGoal = state.Goal.GetOffset() - state.DistanceHasGoneOnLane();
+                else if (goalLane.PrevLanes.Contains(state.CurrentFollowingLane))
+                {
+                    return state.CurrentFollowingLane.TotalLength() - state.DistanceHasGoneOnLane() +
+                           state.Goal.GetOffset();
+                }
+                else if (goalLane.NextLanes.Contains(state.CurrentFollowingLane))
+                {
+                    return -(state.DistanceHasGoneOnLane() + goalLane.TotalLength() - state.Goal.GetOffset());
+                }
+            }
+            // Debug.Log($"Distance to goal is {distanceToGoal}");
+            return distanceToGoal;
+        }
+    }
+}
