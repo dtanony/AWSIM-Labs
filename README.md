@@ -88,6 +88,16 @@ You can download a binary release from [here](https://github.com/dtanony/AWSIM-L
 ```
 
 It may take some time for the application to start the so please wait until image similar to the one presented below is visible in your application window.
+The screen looks like this
+![AWSIM-Labs screen](screenshot.png)
+
+By default, Gaussian noise is added to the simulated data of LiDAR sensors. Use option `-noise false` to disable this noise.
+```bash
+./awsim_labs.x86_64 -noise false
+```
+
+
+
 
 ### Unity Project Setup
 We recommend using the binary release for most use cases. However, if you want to run the simulator inside the Unity Editor or make modifications, follow these steps (adapted from https://autowarefoundation.github.io/AWSIM-Labs/main/GettingStarted/SetupUnityProject/).
